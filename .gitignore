@@ -1,0 +1,16 @@
+# dependências e builds
+node_modules/
+site/dist/
+
+# material bruto (imagens originais da IA, prints de referência) e saídas das ferramentas
+# ficam só no computador; o site usa as versões recortadas em site/public/tenis
+/material/
+/modelo_dos_tenis/
+ferramentas/shots/
+
+# anotações internas do projeto (o repositório é público)
+/PENDENCIAS.md
+/PROMPTS-TENIS.md
+
+*.log
+.DS_Store
