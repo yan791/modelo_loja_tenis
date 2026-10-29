@@ -4,7 +4,7 @@
 # src/dados/loja.js). Para cada imagem:
 #   1. fundo: usa a transparência da imagem só quando ela é limpa. O ChatGPT às vezes pinta um fundo
 #      "falso" (névoa cinza, xadrez desenhado); nesses casos o fundo sai com o rembg (BiRefNet)
-#   2. bordas: estima a cor verdadeira dos pixels semitransparentes (sem halo do fundo antigo)
+#   2. realce leve de detalhe; bordas: estima a cor verdadeira dos pixels semitransparentes (sem halo do fundo antigo)
 #      e espalha a cor para fora do recorte, para a filtragem da GPU não puxar branco
 #   3. corta rente ao tênis e grava site/public/tenis/NN.webp (2048 px) e NN-m.webp (1024 px, celular)
 #   4. tenis.json com tamanho, onde fica a sola (base) e bytes de cada arquivo
@@ -60,6 +60,8 @@ def preparar(caminho):
     except Exception as e:
         print('  aviso: sem estimativa de borda', e)
     cheio = Image.fromarray((np.clip(cor, 0, 1) * 255).astype(np.uint8))
+    # realce leve de detalhe (textura, costura, malha): ajuda de longe, quando a imagem fica pequena
+    cheio = cheio.filter(ImageFilter.UnsharpMask(radius=1.3, percent=55, threshold=2))
     mascara = Image.fromarray((alfa > 0.5).astype(np.uint8) * 255)
     borrado = cheio
     for raio in (2, 6, 16, 40):

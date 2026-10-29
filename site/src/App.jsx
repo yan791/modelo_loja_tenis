@@ -28,6 +28,7 @@ export default function App() {
   const palcoParede = useRef(null)
   const palcoProduto = useRef(null)
   const rotulos = useRef([])
+  const pontos = useRef([])
   const vitrine = useRef(null)
   const ativoRef = useRef(indiceDoHash())
   const rolagemGuardada = useRef(0)
@@ -43,6 +44,7 @@ export default function App() {
   const [painel, setPainel] = useState(null) // sacola | sobre
   const [sacola, setSacola] = useState(lerSacola)
   const [zoom, setZoom] = useState(false)
+  const [detalhe, setDetalhe] = useState(null) // ponto de detalhe aberto no produto
   const [recado, setRecado] = useState(null)
   const [aviso, setAviso] = useState('')
 
@@ -58,6 +60,7 @@ export default function App() {
     }
     setAtivo(i)
     setHover(null)
+    setDetalhe(null)
     if (historico) history.pushState(null, '', i == null ? location.pathname + location.search : `#/${produtos[i].slug}`)
   }, [])
 
@@ -73,7 +76,13 @@ export default function App() {
         rolagem: (px) => vivo && setRolagem(px),
         palcos: () => ({ parede: palcoParede.current.getBoundingClientRect(), produto: palcoProduto.current.getBoundingClientRect() }),
         rotulos: () => rotulos.current,
-        zoom: (z) => vivo && setZoom(z),
+        pontos: () => pontos.current,
+        zoom: (z) => {
+          if (!vivo) return
+          setZoom(z)
+          if (!z) setDetalhe(null)
+        },
+        arrastou: () => vivo && setDetalhe(null),
       })
     } catch (e) {
       console.error(e)
@@ -119,6 +128,12 @@ export default function App() {
       const a = ativoRef.current
       if (a == null) return
       const n = produtos.length
+      const det = produtos[a].detalhes || []
+      if (detalhe != null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+        // com um detalhe aberto, as setas passeiam pelos detalhes do mesmo tênis
+        verDetalhe((detalhe + (e.key === 'ArrowRight' ? 1 : det.length - 1)) % det.length)
+        return
+      }
       if (e.key === 'Escape') {
         // com zoom, o Esc primeiro afasta; depois volta para a parede
         if (vitrine.current?.zoomAlvo > 1.05) vitrine.current.definirZoom(1)
@@ -129,7 +144,7 @@ export default function App() {
     }
     document.addEventListener('keydown', f)
     return () => document.removeEventListener('keydown', f)
-  }, [painel, ir])
+  }, [painel, ir, detalhe])
 
   useEffect(() => {
     try {
@@ -164,6 +179,16 @@ export default function App() {
     const texto = ['Olá! Quero fazer este pedido:', ...linhas.map((it) => `• ${it.p.nome} (${it.p.cor}), BR ${it.tamanho}, ${it.qtd}x`), `Subtotal: ${reais(total)}`].join('\n')
     window.open(`https://wa.me/${marca.whatsapp}?text=${encodeURIComponent(texto)}`, '_blank', 'noopener')
   }
+  // leva a câmera até o detalhe j do tênis em foco
+  function verDetalhe(j) {
+    const d = produtos[ativoRef.current]?.detalhes?.[j]
+    // durante o voo da câmera os pontos ainda estão chegando: no celular, o clique que o navegador
+    // dispara logo depois do toque no tênis cairia num ponto e abriria um detalhe sem querer
+    if (!d || vitrine.current?.trans.de) return
+    setDetalhe(j)
+    vitrine.current?.focarDetalhe(d.x, d.y)
+  }
+
   const fecharPainel = useCallback(() => {
     setPainel(null)
     setAviso('')
@@ -174,13 +199,13 @@ export default function App() {
   const modo = ativo == null ? 'parede' : 'produto'
   const status =
     modo === 'produto'
-      ? 'Role para aproximar. Use as setas para trocar de modelo.'
+      ? 'Clique nos pontos para ver cada detalhe. Use as setas para trocar de modelo.'
       : hover != null
         ? `${produtos[hover].nome} · ${reais(produtos[hover].preco)}. Clique para ver de perto.`
         : 'Passe o mouse para iluminar. Clique para explorar.'
 
   return (
-    <div className={`app modo-${modo} fase-${fase} entrada-${entrada}${zoom ? ' com-zoom' : ''}`}>
+    <div className={`app modo-${modo} fase-${fase} entrada-${entrada}${zoom ? ' com-zoom' : ''}${detalhe != null ? ' com-detalhe' : ''}`}>
       <canvas ref={canvas} className="cena" aria-hidden="true" />
       <div className="vinheta" aria-hidden="true" />
       <div ref={palcoParede} className="palco palco--parede" aria-hidden="true" />
@@ -267,8 +292,47 @@ export default function App() {
             →
           </button>
         </div>
+        <div className="marcadores" key={`p${mostrado}-${visita}`}>
+          {(produtos[mostrado].detalhes || []).map((d, j) => (
+            <button
+              key={j}
+              type="button"
+              ref={(el) => (pontos.current[j] = el)}
+              className={`marcador${detalhe === j ? ' marcador--ativo' : ''}`}
+              style={{ '--j': j }}
+              onClick={() => verDetalhe(j)}
+              aria-label={`Ver detalhe: ${d.titulo}`}
+            >
+              <span className="marcador__miolo">
+                <span className="marcador__anel" />
+                {j + 1}
+              </span>
+              <span className="marcador__dica">{d.titulo}</span>
+            </button>
+          ))}
+        </div>
+        {detalhe != null && produtos[mostrado].detalhes?.[detalhe] && (
+          <div className="legenda" key={`l${mostrado}-${detalhe}`} role="status">
+            <p className="olho">
+              Detalhe {dois(detalhe + 1)} / {dois(produtos[mostrado].detalhes.length)}
+            </p>
+            <strong>{produtos[mostrado].detalhes[detalhe].titulo}</strong>
+            <p className="legenda__texto">{produtos[mostrado].detalhes[detalhe].texto}</p>
+            <div className="legenda__nav">
+              <button type="button" aria-label="Detalhe anterior" onClick={() => verDetalhe((detalhe + produtos[mostrado].detalhes.length - 1) % produtos[mostrado].detalhes.length)}>
+                ←
+              </button>
+              <button type="button" aria-label="Próximo detalhe" onClick={() => verDetalhe((detalhe + 1) % produtos[mostrado].detalhes.length)}>
+                →
+              </button>
+              <button type="button" className="legenda__afastar" onClick={() => vitrine.current?.definirZoom(1)}>
+                <Lupa className="icone" /> Afastar
+              </button>
+            </div>
+          </div>
+        )}
         <p className="dica-zoom">
-          <Lupa className="icone" /> {toque ? 'Toque duas vezes para aproximar' : 'Role ou dê dois cliques para aproximar'}
+          <Lupa className="icone" /> {toque ? 'Toque nos pontos para ver de perto' : 'Clique nos pontos ou role para aproximar'}
         </p>
         <button type="button" className="afastar" onClick={() => vitrine.current?.definirZoom(1)} tabIndex={zoom ? 0 : -1}>
           <Lupa className="icone" /> Afastar

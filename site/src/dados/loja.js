@@ -15,10 +15,15 @@ export const loja = {
   guia: { 34: '22,5', 35: '23,0', 36: '23,5', 37: '24,5', 38: '25,0', 39: '25,5', 40: '26,5', 41: '27,0', 42: '27,5', 43: '28,5', 44: '29,0' },
 }
 
-// cor: usada na sacola (amostras) e na luz de destaque de cada prateleira
+// amostras: cores da sacola. detalhes: pontos na foto (x, y de 0 a 1 a partir do canto de cima à esquerda)
 export const produtos = [
   {
     slug: 'brasa-01',
+    detalhes: [
+      { x: 0.4, y: 0.8, titulo: 'Bolhas de ar translúcidas', texto: 'Câmaras de ar ao longo de toda a sola, que amortecem cada passada.' },
+      { x: 0.33, y: 0.46, titulo: 'Malha esculpida', texto: 'Relevos em ondas que acompanham o movimento do pé.' },
+      { x: 0.56, y: 0.3, titulo: 'Cadarço tom sobre tom', texto: 'O mesmo coral do cabedal, do bico ao calcanhar.' },
+    ],
     nome: 'BRASA 01',
     linha: 'Corrida',
     preco: 649,
@@ -29,6 +34,11 @@ export const produtos = [
   },
   {
     slug: 'mata-02',
+    detalhes: [
+      { x: 0.25, y: 0.33, titulo: 'Tira com fivela', texto: 'Ajusta o tornozelo e dá firmeza ao cano alto.' },
+      { x: 0.82, y: 0.63, titulo: 'Bico perfurado', texto: 'Furos de ventilação no couro do bico.' },
+      { x: 0.17, y: 0.15, titulo: 'Gola acolchoada', texto: 'Acolchoamento macio em volta do tornozelo.' },
+    ],
     nome: 'MATA 02',
     linha: 'Cano alto',
     preco: 599,
@@ -39,6 +49,11 @@ export const produtos = [
   },
   {
     slug: 'anil-03',
+    detalhes: [
+      { x: 0.42, y: 0.43, titulo: 'Gomos acolchoados', texto: 'Painéis estofados em couro, com costura aparente.' },
+      { x: 0.38, y: 0.78, titulo: 'Bolhas de ar azuis', texto: 'Câmaras translúcidas do calcanhar ao bico.' },
+      { x: 0.9, y: 0.62, titulo: 'Bico em couro branco', texto: 'Reforço na ponta e contraste com o azul.' },
+    ],
     nome: 'ANIL 03',
     linha: 'Corrida',
     preco: 689,
@@ -49,6 +64,11 @@ export const produtos = [
   },
   {
     slug: 'quartzo-04',
+    detalhes: [
+      { x: 0.08, y: 0.17, titulo: 'Dois puxadores', texto: 'Ajudam a calçar e marcam o desenho do calcanhar.' },
+      { x: 0.5, y: 0.76, titulo: 'Sola ondulada', texto: 'Camadas de espuma que formam ondas na lateral.' },
+      { x: 0.46, y: 0.4, titulo: 'Volumes em camadas', texto: 'Painéis sobrepostos em camurça e couro sintético.' },
+    ],
     nome: 'QUARTZO 04',
     linha: 'Chunky',
     preco: 629,
@@ -59,6 +79,11 @@ export const produtos = [
   },
   {
     slug: 'grafite-05',
+    detalhes: [
+      { x: 0.49, y: 0.15, titulo: 'Cadarço com trava', texto: 'Ajuste rápido, sem precisar dar laço.' },
+      { x: 0.93, y: 0.6, titulo: 'Biqueira de borracha', texto: 'Protege a ponta contra pedras e raízes.' },
+      { x: 0.3, y: 0.9, titulo: 'Cravos profundos', texto: 'Tração na terra, na pedra e no asfalto molhado.' },
+    ],
     nome: 'GRAFITE 05',
     linha: 'Trilha',
     preco: 719,

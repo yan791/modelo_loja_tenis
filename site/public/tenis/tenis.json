@@ -4,39 +4,39 @@
   "largura": 1502,
   "altura": 719,
   "base": 0.0292,
-  "bytes": 245144,
-  "bytes_m": 132422
+  "bytes": 288036,
+  "bytes_m": 149386
  },
  {
   "n": "02",
   "largura": 1527,
   "altura": 904,
   "base": 0.0254,
-  "bytes": 232970,
-  "bytes_m": 118380
+  "bytes": 306186,
+  "bytes_m": 146386
  },
  {
   "n": "03",
   "largura": 1532,
   "altura": 750,
   "base": 0.0293,
-  "bytes": 308422,
-  "bytes_m": 162662
+  "bytes": 352358,
+  "bytes_m": 178220
  },
  {
   "n": "04",
   "largura": 1536,
   "altura": 917,
   "base": 0.0251,
-  "bytes": 303568,
-  "bytes_m": 164616
+  "bytes": 358608,
+  "bytes_m": 183944
  },
  {
   "n": "05",
   "largura": 1536,
   "altura": 850,
   "base": 0.0259,
-  "bytes": 383220,
-  "bytes_m": 184448
+  "bytes": 450970,
+  "bytes_m": 209010
  }
 ]

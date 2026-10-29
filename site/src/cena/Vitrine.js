@@ -1,6 +1,7 @@
-// Parede da vitrine em three.js: prateleiras de acrílico com um tênis em cada (imagens recortadas,
-// geradas por IA), câmera que voa até o tênis escolhido, LED laranja que acende na prateleira e zoom
-// para ver os detalhes. A interface (textos, preço, sacola) é DOM, feita no React; esta classe só cuida do 3D.
+// Parede da vitrine em three.js: prateleiras de vidro com um tênis em cada (imagens recortadas, geradas
+// por IA), parede de reboco fotográfico com luz de spot sobre cada prateleira, câmera que voa até o tênis,
+// LED que acende no vidro, zoom e pontos de detalhe. A interface (textos, preço, sacola) é DOM, feita no
+// React; esta classe só cuida do 3D.
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import gsap from 'gsap'
@@ -8,9 +9,11 @@ import gsap from 'gsap'
 const BASE = import.meta.env.BASE_URL
 const FOV = 24
 const PASSO = { x: 1.3, y: 1.26 }
-const PRAT = { w: 1.14, h: 0.036, d: 0.38 }
-const Z_TENIS = PRAT.d * 0.58 // o tênis fica um pouco à frente do meio da prateleira
+const PRAT = { w: 1.14, h: 0.036, d: 0.4 }
+const Z_TENIS = PRAT.d * 0.56 // o tênis fica um pouco à frente do meio da prateleira
 const ZOOM_MAX = 2.2
+const ZOOM_DETALHE = 2.1
+const ESCALA_PAREDE = 10.7 // a textura cobre 3,2 m de reboco; 1 unidade da cena = 30 cm (um tênis)
 const COR_LED = new THREE.Color('#ff6f14')
 const COR_NUCLEO = new THREE.Color('#ffd29a')
 
@@ -20,7 +23,7 @@ async function baixar(url, aoAvancar) {
   if (!r.body) {
     const b = await r.arrayBuffer()
     aoAvancar(b.byteLength)
-    return b
+    return new Blob([b])
   }
   const leitor = r.body.getReader()
   const partes = []
@@ -35,16 +38,60 @@ async function baixar(url, aoAvancar) {
   return new Blob(partes)
 }
 
-async function textura(dados, anisotropia) {
-  const blob = dados instanceof Blob ? dados : new Blob([dados])
-  // flipY no próprio bitmap: ImageBitmap ignora texture.flipY
-  const bmp = await createImageBitmap(blob, { imageOrientation: 'flipY', premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
-  const t = new THREE.Texture(bmp)
+// Imagem do tênis com as reduções (mipmaps) feitas pelo navegador em alta qualidade: de longe o tênis
+// fica nítido, sem o borrado da redução padrão da placa de vídeo
+async function texturaFoto(blob, anisotropia) {
+  const opc = { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }
+  const nivel0 = await createImageBitmap(blob, { ...opc, imageOrientation: 'flipY' })
+  const niveis = [nivel0]
+  let { width: l, height: a } = nivel0
+  try {
+    while (l > 1 || a > 1) {
+      l = Math.max(1, l >> 1)
+      a = Math.max(1, a >> 1)
+      niveis.push(await createImageBitmap(niveis[niveis.length - 1], { ...opc, resizeWidth: l, resizeHeight: a, resizeQuality: 'high' }))
+    }
+  } catch {
+    niveis.length = 1 // navegador sem redimensionamento: a placa de vídeo gera as reduções
+  }
+  const t = new THREE.Texture(nivel0)
+  if (niveis.length > 1) {
+    t.mipmaps = niveis
+    t.generateMipmaps = false
+  }
   t.flipY = false
   t.colorSpace = THREE.SRGBColorSpace
+  t.minFilter = THREE.LinearMipmapLinearFilter
   t.anisotropy = anisotropia
   t.needsUpdate = true
   return t
+}
+
+async function texturaParede(blob, cor) {
+  const bmp = await createImageBitmap(blob, { imageOrientation: 'flipY', colorSpaceConversion: 'none' })
+  const t = new THREE.Texture(bmp)
+  t.flipY = false
+  t.wrapS = t.wrapT = THREE.RepeatWrapping
+  t.colorSpace = cor ? THREE.SRGBColorSpace : THREE.NoColorSpace
+  t.anisotropy = 8
+  t.needsUpdate = true
+  return t
+}
+
+// Sombra suave do tênis na parede: a silhueta da imagem, pequena e desfocada
+function texturaSombra(bmp) {
+  const l = 256
+  const a = Math.round((bmp.height / bmp.width) * l)
+  const folga = 24
+  const c = document.createElement('canvas')
+  c.width = l + folga * 2
+  c.height = a + folga * 2
+  const ctx = c.getContext('2d')
+  ctx.filter = 'blur(7px) brightness(0)'
+  ctx.drawImage(bmp, folga, folga, l, a)
+  const t = new THREE.CanvasTexture(c)
+  t.flipY = false // o bitmap já vem invertido
+  return { t, folga: folga / l }
 }
 
 // Textura desenhada em canvas: fn(u, v) devolve [cinza, alfa] de 0 a 1
@@ -73,61 +120,26 @@ const suave = (a, b, x) => {
   return t * t * (3 - 2 * t)
 }
 
-// Reboco: ruído de valor em algumas oitavas, com emenda perfeita nas bordas (a textura se repete na parede)
-function texturaReboco() {
-  const tam = 512
-  const c = document.createElement('canvas')
-  c.width = c.height = tam
-  const ctx = c.getContext('2d')
-  const img = ctx.createImageData(tam, tam)
-  const soma = new Float32Array(tam * tam)
-  for (const [n, peso] of [[4, 0.09], [16, 0.07], [64, 0.05], [256, 0.035]]) {
-    const grade = Float32Array.from({ length: n * n }, () => Math.random())
-    for (let y = 0; y < tam; y++) {
-      const fy = (y / tam) * n
-      const y0 = Math.floor(fy)
-      const ty = fy - y0
-      const sy = ty * ty * (3 - 2 * ty)
-      for (let x = 0; x < tam; x++) {
-        const fx = (x / tam) * n
-        const x0 = Math.floor(fx)
-        const tx = fx - x0
-        const sx = tx * tx * (3 - 2 * tx)
-        const a = grade[(y0 % n) * n + (x0 % n)]
-        const b = grade[(y0 % n) * n + ((x0 + 1) % n)]
-        const cc = grade[((y0 + 1) % n) * n + (x0 % n)]
-        const d = grade[((y0 + 1) % n) * n + ((x0 + 1) % n)]
-        soma[y * tam + x] += ((a + (b - a) * sx) * (1 - sy) + (cc + (d - cc) * sx) * sy - 0.5) * peso
-      }
-    }
-  }
-  for (let i = 0; i < tam * tam; i++) {
-    const v = Math.round(Math.min(1, Math.max(0, 0.9 + soma[i])) * 255)
-    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v
-    img.data[i * 4 + 3] = 255
-  }
-  ctx.putImageData(img, 0, 0)
-  const t = new THREE.CanvasTexture(c)
-  t.wrapS = t.wrapT = THREE.RepeatWrapping
-  t.colorSpace = THREE.SRGBColorSpace
-  t.anisotropy = 4
-  return t
-}
-
-// Tênis: a foto sem iluminação da cena (já vem com luz de estúdio) + a luz quente do LED subindo pela sola
-function materialTenis(tex) {
-  const u = { uLuz: { value: 0 }, uLed: { value: COR_LED.clone() }, uApaga: { value: 0 } }
+// Tênis: a foto sem iluminação da cena (já vem com luz de estúdio), mais:
+//  - contato: a sola escurece um pouco onde encosta no vidro
+//  - LED: luz quente subindo pela sola quando a prateleira acende
+//  - foco: no produto, os vizinhos ficam desfocados e na penumbra (como numa lente de câmera)
+function materialTenis(tex, base) {
+  const u = { uLuz: { value: 0 }, uLed: { value: COR_LED.clone() }, uApaga: { value: 0 }, uVies: { value: -0.45 }, uBase: { value: base } }
   const m = new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false, alphaTest: 0.004 })
   m.userData.u = u
   m.onBeforeCompile = (s) => {
     Object.assign(s.uniforms, u)
     s.fragmentShader =
-      'uniform float uLuz;\nuniform vec3 uLed;\nuniform float uApaga;\n' +
+      'uniform float uLuz;\nuniform vec3 uLed;\nuniform float uApaga;\nuniform float uVies;\nuniform float uBase;\n' +
       s.fragmentShader.replace(
         '#include <map_fragment>',
-        `#include <map_fragment>
+        `#ifdef USE_MAP
+          diffuseColor *= texture2D( map, vMapUv, uVies );
+        #endif
+        float contato = mix( 0.72, 1.0, smoothstep( uBase, uBase + 0.045, vMapUv.y ) );
         float baixo = 1.0 - smoothstep( 0.0, 0.45, vMapUv.y );
-        diffuseColor.rgb *= 0.9 + uLed * uLuz * baixo * baixo * 1.1;
+        diffuseColor.rgb *= ( 0.9 + uLed * uLuz * baixo * baixo * 1.1 ) * contato;
         diffuseColor.rgb += uLed * uLuz * baixo * baixo * baixo * 0.05;
         diffuseColor.rgb *= 1.0 - uApaga * 0.42;`,
       )
@@ -136,15 +148,51 @@ function materialTenis(tex) {
   return m
 }
 
+// Reflexo do tênis no tampo de vidro: a mesma foto espelhada, desbotando rápido a partir da sola.
+// Só aparece onde o tampo foi desenhado (stencil), então não vaza para a parede.
+function materialReflexo(tex, base) {
+  const u = { uBase: { value: base }, uForca: { value: 0.45 } }
+  const m = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    toneMapped: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    stencilWrite: true,
+    stencilRef: 1,
+    stencilFunc: THREE.EqualStencilFunc,
+    stencilFail: THREE.KeepStencilOp,
+    stencilZFail: THREE.KeepStencilOp,
+    stencilZPass: THREE.KeepStencilOp,
+  })
+  m.onBeforeCompile = (s) => {
+    Object.assign(s.uniforms, u)
+    s.fragmentShader =
+      'uniform float uBase;\nuniform float uForca;\n' +
+      s.fragmentShader.replace(
+        '#include <map_fragment>',
+        `#ifdef USE_MAP
+          diffuseColor *= texture2D( map, vMapUv, 1.2 );
+        #endif
+        diffuseColor.a *= uForca * ( 1.0 - smoothstep( uBase, uBase + 0.22, vMapUv.y ) );
+        diffuseColor.rgb *= 0.85;`,
+      )
+  }
+  m.customProgramCacheKey = () => 'tenis-reflexo'
+  m.userData.u = u
+  return m
+}
+
 export class Vitrine {
   constructor(canvas, cb) {
     this.canvas = canvas
-    this.cb = cb // { progresso, hover, selecionar, rolagem, palcos, rotulos, zoom }
+    this.cb = cb // { progresso, hover, selecionar, rolagem, palcos, rotulos, pontos, zoom }
     this.modo = 'parede'
     this.ativo = null
     this.hover = null
     this.cols = 0
     this.slots = []
+    this.produtos = []
     this.mouse = new THREE.Vector2()
     this.mouseSuave = new THREE.Vector2()
     this.zoom = 1
@@ -156,14 +204,11 @@ export class Vitrine {
     this.sujo = true
     this.rolagemMax = 0
 
-    const r = (this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' }))
+    const r = (this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: 'high-performance' }))
     r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
     r.outputColorSpace = THREE.SRGBColorSpace
     r.toneMapping = THREE.NeutralToneMapping
-    r.shadowMap.enabled = true
-    r.shadowMap.type = THREE.PCFShadowMap
-    r.shadowMap.autoUpdate = false
-    r.setClearColor('#262422')
+    r.setClearColor('#232221')
 
     this.cena = new THREE.Scene()
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 60)
@@ -183,33 +228,46 @@ export class Vitrine {
   }
 
   montarAmbiente() {
-    const reboco = texturaReboco()
-    reboco.repeat.set(6, 4)
-    this.parede = new THREE.Mesh(
-      new THREE.PlaneGeometry(48, 30),
-      new THREE.MeshStandardMaterial({ color: '#57544f', map: reboco, roughness: 0.95, metalness: 0, envMapIntensity: 0.45 }),
-    )
-    this.parede.receiveShadow = true
+    // parede de reboco pintado; a cor e o relevo chegam no carregamento (texturas fotográficas)
+    this.focos = { valor: Array.from({ length: 10 }, () => new THREE.Vector3()) }
+    this.uParede = { uFocos: this.focos, uQtdFocos: { value: 0 }, uForcaFoco: { value: 0.75 } }
+    this.matParede = new THREE.MeshStandardMaterial({ color: '#77746f', roughness: 0.93, metalness: 0, envMapIntensity: 0.4 })
+    this.matParede.onBeforeCompile = (s) => {
+      s.uniforms.uFocos = { value: this.focos.valor }
+      s.uniforms.uQtdFocos = this.uParede.uQtdFocos
+      s.uniforms.uForcaFoco = this.uParede.uForcaFoco
+      s.vertexShader = s.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vMundo;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvMundo = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;')
+      // spot de teto sobre cada prateleira: o "leque" de luz clássico de vitrine, aberto para baixo
+      s.fragmentShader = s.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vMundo;\nuniform vec3 uFocos[10];\nuniform int uQtdFocos;\nuniform float uForcaFoco;')
+        .replace(
+          '#include <opaque_fragment>',
+          `float leque = 0.0;
+          for ( int i = 0; i < 10; i ++ ) {
+            if ( i >= uQtdFocos ) break;
+            vec3 f = uFocos[ i ];
+            float dy = f.y - vMundo.y;
+            float dx = vMundo.x - f.x;
+            float largura = 0.16 + 0.42 * max( dy, 0.0 );
+            float corpo = smoothstep( -0.05, 0.3, dy ) * exp( -0.55 * max( dy, 0.0 ) );
+            leque += corpo * exp( - ( dx * dx ) / ( largura * largura ) ) * f.z;
+          }
+          outgoingLight += diffuseColor.rgb * leque * uForcaFoco * vec3( 1.0, 0.93, 0.84 );
+          #include <opaque_fragment>`,
+        )
+    }
+    this.parede = new THREE.Mesh(new THREE.PlaneGeometry(48, 30), this.matParede)
     this.cena.add(this.parede)
 
     // aparador comprido perto do chão, como no balcão de uma loja
-    this.aparador = new THREE.Mesh(
-      new THREE.BoxGeometry(48, 0.05, 0.5),
-      new THREE.MeshStandardMaterial({ color: '#3a3633', roughness: 0.6, metalness: 0, envMapIntensity: 0.6 }),
-    )
-    this.aparador.receiveShadow = true
+    this.aparador = new THREE.Mesh(new THREE.BoxGeometry(48, 0.05, 0.5), new THREE.MeshStandardMaterial({ color: '#34312e', roughness: 0.6, metalness: 0, envMapIntensity: 0.6 }))
     this.cena.add(this.aparador)
 
-    this.cena.add(new THREE.HemisphereLight('#f6eee6', '#3b3431', 0.55))
-
-    const chave = (this.chave = new THREE.SpotLight('#fff4ea', 2.5, 0, 0.5, 1, 0))
-    chave.castShadow = true
-    chave.shadow.mapSize.set(2048, 2048)
-    chave.shadow.bias = -0.0004
-    chave.shadow.normalBias = 0.01
-    chave.shadow.radius = 9
-    chave.shadow.camera.near = 4
-    chave.shadow.camera.far = 24
+    this.cena.add(new THREE.HemisphereLight('#f3ede6', '#38322f', 0.45))
+    // luz geral vinda do alto à esquerda (sem shadow map: as sombras são desenhadas, mais suaves e baratas)
+    const chave = (this.chave = new THREE.SpotLight('#fff4ea', 2.1, 0, 0.5, 1, 0))
     this.cena.add(chave, chave.target)
 
     this.texHalo = texturaCanvas(256, 64, (u, v) => {
@@ -227,54 +285,82 @@ export class Vitrine {
       const y = (v - 0.5) * 2
       return [Math.exp(-(x * x * 2.2 + y * y * 3.2)) * (1 - suave(0.9, 1, Math.hypot(x, y))), 1]
     })
+    this.texContato = texturaCanvas(128, 64, (u, v) => {
+      const x = (u - 0.5) * 2
+      const y = (v - 0.5) * 2
+      return [0, Math.exp(-(x * x * 2.2 + y * y * 7)) * 0.95]
+    })
     this.texSombraPrat = texturaCanvas(128, 64, (u, v) => {
       const bordas = suave(0, 0.12, u) * suave(1, 0.88, u)
       return [0, bordas * Math.pow(1 - v, 1.6) * 0.8]
     })
-    this.texContato = texturaCanvas(128, 64, (u, v) => {
-      const x = (u - 0.5) * 2
-      const y = (v - 0.5) * 2
-      return [0, Math.exp(-(x * x * 2.6 + y * y * 6)) * 0.9]
+    // brilho do vidro: faixa clara no fundo do tampo, como a luz refletida numa placa de acrílico
+    this.texBrilho = texturaCanvas(256, 64, (u, v) => {
+      const bordas = suave(0, 0.08, u) * suave(1, 0.92, u)
+      return [1, bordas * (Math.exp(-Math.pow((v - 0.12) / 0.06, 2)) * 0.9 + (1 - v) * 0.12)]
     })
 
     this.geoPrat = new THREE.BoxGeometry(PRAT.w, PRAT.h, PRAT.d)
-    this.matAcrilico = new THREE.MeshPhysicalMaterial({
-      color: '#c9d9d5',
+    const vidro = {
+      color: '#c3d6d0',
       transparent: true,
-      opacity: 0.14,
-      roughness: 0.05,
+      roughness: 0.04,
       metalness: 0,
       clearcoat: 1,
       clearcoatRoughness: 0.03,
-      envMapIntensity: 1.1,
+      envMapIntensity: 1.2,
       depthWrite: false,
+    }
+    this.matVidro = new THREE.MeshPhysicalMaterial({ ...vidro, opacity: 0.12 })
+    // o tampo marca o stencil: o reflexo do tênis só aparece dentro dele
+    this.matTampo = new THREE.MeshPhysicalMaterial({
+      ...vidro,
+      opacity: 0.2,
+      stencilWrite: true,
+      stencilRef: 1,
+      stencilFunc: THREE.AlwaysStencilFunc,
+      stencilZPass: THREE.ReplaceStencilOp,
     })
     this.geoPlano = new THREE.PlaneGeometry(1, 1)
     this.matAlvo = new THREE.MeshBasicMaterial({ visible: false })
   }
 
   async carregar(produtos) {
+    this.produtos = produtos
     const leve = window.matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820
+    const sufixo = leve ? '-m' : ''
     const info = await (await fetch(`${BASE}tenis/tenis.json`)).json()
     const lista = produtos.map((p, i) => {
       if (!info[i]) throw new Error(`falta a imagem do tênis ${i + 1} (rode ferramentas/recortar.py)`)
       return info[i]
     })
-    const pesos = lista.map((r) => (leve ? r.bytes_m : r.bytes))
-    const total = pesos.reduce((a, b) => a + b, 0)
-    const lidos = lista.map(() => 0)
-    const aniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy())
-    const texs = await Promise.all(
-      lista.map(async (r, i) => {
-        const dados = await baixar(`${BASE}tenis/${r.n}${leve ? '-m' : ''}.webp`, (l) => {
-          lidos[i] = Math.min(l, pesos[i])
+    const arquivos = [
+      ...lista.map((r) => ({ url: `tenis/${r.n}${sufixo}.webp`, peso: leve ? r.bytes_m : r.bytes })),
+      { url: `parede/cor${sufixo}.webp`, peso: leve ? 26e3 : 190e3 },
+      { url: `parede/normal${sufixo}.webp`, peso: leve ? 130e3 : 640e3 },
+    ]
+    const total = arquivos.reduce((a, f) => a + f.peso, 0)
+    const lidos = arquivos.map(() => 0)
+    const blobs = await Promise.all(
+      arquivos.map((f, i) =>
+        baixar(BASE + f.url, (l) => {
+          lidos[i] = Math.min(l, f.peso)
           this.cb.progresso?.(lidos.reduce((a, b) => a + b, 0) / total)
-        })
-        return textura(dados, aniso)
-      }),
+        }),
+      ),
     )
+    const aniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy())
+    const texs = await Promise.all(lista.map((_, i) => texturaFoto(blobs[i], aniso)))
+    const [cor, normal] = await Promise.all([texturaParede(blobs[lista.length], true), texturaParede(blobs[lista.length + 1], false)])
+    cor.repeat.set(48 / ESCALA_PAREDE, 30 / ESCALA_PAREDE)
+    normal.repeat.copy(cor.repeat)
+    this.matParede.map = cor
+    this.matParede.normalMap = normal
+    this.matParede.normalScale.set(1.4, 1.4)
+    this.matParede.needsUpdate = true
+
     // sobe as imagens para a placa de vídeo agora, ainda com a tela de carregamento na frente
-    for (const t of texs) this.renderer.initTexture(t)
+    for (const t of [...texs, cor, normal]) this.renderer.initTexture(t)
     this.slots = lista.map((r, i) => this.criarSlot(i, texs[i], r))
     this.redimensionar()
   }
@@ -282,45 +368,74 @@ export class Vitrine {
   criarSlot(i, tex, info) {
     const grupo = new THREE.Group()
     const matFrente = new THREE.MeshStandardMaterial({
-      color: '#d3e0dc',
+      color: '#bfd3cc',
       transparent: true,
       opacity: 0.5,
-      roughness: 0.15,
+      roughness: 0.12,
       emissive: COR_LED.clone(),
       emissiveIntensity: 0,
       depthWrite: false,
     })
-    // BoxGeometry: +x, -x, +y, -y, +z, -z
-    const prat = new THREE.Mesh(this.geoPrat, [matFrente, matFrente, this.matAcrilico, this.matAcrilico, matFrente, this.matAcrilico])
+    // BoxGeometry: +x, -x, +y (tampo), -y, +z (frente), -z
+    const prat = new THREE.Mesh(this.geoPrat, [matFrente, matFrente, this.matTampo, this.matVidro, matFrente, this.matVidro])
     prat.position.set(0, -PRAT.h / 2, PRAT.d / 2)
     prat.renderOrder = 2
     grupo.add(prat)
 
-    // acrílico deixa passar luz: em vez da sombra cheia do shadow map, uma faixa suave na parede
-    const sombraPrat = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ map: this.texSombraPrat, color: '#000', transparent: true, depthWrite: false, opacity: 0.5 }))
+    // aresta de cima da frente: a linha de luz que todo vidro grosso tem
+    const aresta = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ color: '#f4fbf8', transparent: true, opacity: 0.55, depthWrite: false }))
+    aresta.scale.set(PRAT.w, 0.0045, 1)
+    aresta.position.set(0, -0.002, PRAT.d + 0.001)
+    aresta.renderOrder = 6
+    grupo.add(aresta)
+
+    const brilho = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ map: this.texBrilho, color: '#ffffff', transparent: true, opacity: 0.22, depthWrite: false }))
+    brilho.rotation.x = -Math.PI / 2
+    brilho.scale.set(PRAT.w * 0.99, PRAT.d * 0.98, 1)
+    brilho.position.set(0, 0.0012, PRAT.d / 2)
+    brilho.renderOrder = 4
+    grupo.add(brilho)
+
+    // acrílico deixa passar luz: em vez de sombra dura, uma faixa suave na parede
+    const sombraPrat = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ map: this.texSombraPrat, color: '#000', transparent: true, depthWrite: false, opacity: 0.55 }))
     sombraPrat.scale.set(PRAT.w * 1.08, 0.34, 1)
     sombraPrat.position.set(0.04, -0.2, 0.003)
     sombraPrat.renderOrder = 1
     grupo.add(sombraPrat)
 
-    // a imagem: largura 1 (todos os tênis com o mesmo comprimento), sola encostada no acrílico
+    // a foto: largura 1 (todos os tênis com o mesmo comprimento), sola encostada no vidro
     const aspecto = info.altura / info.largura
+    const base = info.base || 0
     const geo = new THREE.PlaneGeometry(1, aspecto)
-    geo.translate(0, aspecto / 2 - (info.base || 0) * aspecto, 0)
+    geo.translate(0, aspecto / 2 - base * aspecto, 0)
     const pivo = new THREE.Group()
-    pivo.position.set(0, 0.002, Z_TENIS)
-    const tenis = new THREE.Mesh(geo, materialTenis(tex))
-    tenis.castShadow = true
-    tenis.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: tex, alphaTest: 0.5 })
+    pivo.position.set(0, 0.001, Z_TENIS)
+    const tenis = new THREE.Mesh(geo, materialTenis(tex, base))
     tenis.renderOrder = 5
     pivo.add(tenis)
     grupo.add(pivo)
 
-    const contato = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ map: this.texContato, color: '#000', transparent: true, depthWrite: false, opacity: 0.75 }))
+    const reflexo = new THREE.Mesh(geo, materialReflexo(tex, base))
+    reflexo.scale.y = -1
+    reflexo.position.set(0, 0.001, Z_TENIS)
+    reflexo.renderOrder = 3
+    grupo.add(reflexo)
+
+    // sombra do tênis na parede, caindo para baixo e para a direita (a luz vem do alto à esquerda)
+    const { t: texSombra, folga } = texturaSombra(tex.image)
+    const sombra = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ map: texSombra, color: '#000', transparent: true, depthWrite: false, opacity: 0.42 }))
+    const ls = 1 + folga * 2
+    const as = aspecto + folga * 2
+    sombra.scale.set(ls * 1.02, as * 1.02, 1)
+    sombra.position.set(0.07, as / 2 - folga - base * aspecto - 0.13, 0.005)
+    sombra.renderOrder = 1
+    grupo.add(sombra)
+
+    const contato = new THREE.Mesh(this.geoPlano, new THREE.MeshBasicMaterial({ map: this.texContato, color: '#000', transparent: true, depthWrite: false, opacity: 1 }))
     contato.rotation.x = -Math.PI / 2
-    contato.scale.set(0.98, 0.3, 1)
-    contato.position.set(0, 0.001, Z_TENIS)
-    contato.renderOrder = 3
+    contato.scale.set(0.96, 0.24, 1)
+    contato.position.set(0, 0.0016, Z_TENIS)
+    contato.renderOrder = 4.5 // depois do brilho do LED, para a sombra não clarear
     grupo.add(contato)
 
     const aditivo = (map, cor) => new THREE.MeshBasicMaterial({ map, color: cor, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 })
@@ -334,7 +449,7 @@ export class Vitrine {
     nucleo.renderOrder = 7
     const espalha = new THREE.Mesh(this.geoPlano, aditivo(this.texEspalha, COR_LED.clone().multiplyScalar(0.9)))
     espalha.scale.set(PRAT.w * 1.7, 0.75, 1)
-    espalha.position.set(0, -0.1, 0.004)
+    espalha.position.set(0, -0.1, 0.006)
     espalha.renderOrder = 1
     const topo = new THREE.Mesh(this.geoPlano, aditivo(this.texEspalha, COR_LED.clone().multiplyScalar(0.8)))
     topo.rotation.x = -Math.PI / 2
@@ -356,11 +471,10 @@ export class Vitrine {
       tenis,
       alvo,
       aspecto,
+      base,
       matFrente,
       uniformes: tenis.material.userData.u,
       brilhos: [halo, nucleo, espalha, topo],
-      elev: 0,
-      alvoElev: 0,
       luz: 0,
       alvoLuz: 0,
       apaga: 0,
@@ -383,23 +497,22 @@ export class Vitrine {
       s.x = (c - (naLinha - 1) / 2) * PASSO.x
       s.y = ((linhas - 1) / 2 - l) * PASSO.y
       s.grupo.position.set(s.x, s.y, 0)
+      this.focos.valor[s.i].set(s.x, s.y + 1.02, 1)
       minX = Math.min(minX, s.x - PRAT.w / 2)
       maxX = Math.max(maxX, s.x + PRAT.w / 2)
       minY = Math.min(minY, s.y - PRAT.h)
       maxY = Math.max(maxY, s.y + s.aspecto + 0.04)
     }
+    this.uParede.uQtdFocos.value = n
     this.limites = { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY }
     const L = this.limites
     this.aparador.visible = cols > 2
     this.aparador.position.set(0, L.minY - 0.62, 0.25)
-    // a luz principal vem do alto à esquerda e cobre a grade toda
+    // a luz geral vem do alto à esquerda e cobre a grade toda
     this.chave.target.position.set(L.cx + 0.5, L.cy - 0.2, 0)
     this.chave.position.set(L.cx - 3.2, L.cy + 6, 8.5)
     const dist = this.chave.position.distanceTo(this.chave.target.position)
     this.chave.angle = Math.min(1.0, Math.atan(Math.hypot(L.w, L.h + 1.6) / 2 / dist) * 1.5)
-    this.chave.shadow.camera.far = dist + 6
-    this.chave.shadow.camera.updateProjectionMatrix()
-    this.renderer.shadowMap.needsUpdate = true
   }
 
   redimensionar() {
@@ -451,7 +564,8 @@ export class Vitrine {
 
   quadroProduto() {
     const s = this.slots[this.ativo]
-    return this.enquadrar(s.x, s.y + s.aspecto / 2, Z_TENIS, 1.04, s.aspecto + 0.08, this.palcos.produto, { elevacao: 0.06 })
+    // um pouco mais de cima que na parede: o tampo de vidro aparece embaixo da sola
+    return this.enquadrar(s.x, s.y + s.aspecto / 2, Z_TENIS, 1.04, s.aspecto + 0.08, this.palcos.produto, { elevacao: 0.09 })
   }
 
   destino() {
@@ -470,7 +584,13 @@ export class Vitrine {
       return d
     }
     const L = this.limites
-    return this.enquadrar(L.cx, L.cy, PRAT.d / 2, L.w, L.h, this.palcos.parede, { rolar: this.rolagemMax > 0, elevacao: 0.05 })
+    return this.enquadrar(L.cx, L.cy, PRAT.d / 2, L.w, L.h, this.palcos.parede, { rolar: this.rolagemMax > 0, elevacao: 0.045 })
+  }
+
+  // ponto (u, v) da foto do tênis i (0 a 1, a partir do canto de cima à esquerda) no mundo
+  pontoDaFoto(i, u, v) {
+    const s = this.slots[i]
+    return new THREE.Vector3(s.x + (u - 0.5), s.y + 0.001 + (1 - v - s.base) * s.aspecto, Z_TENIS)
   }
 
   // --- navegação ----------------------------------------------------------------------------------
@@ -484,10 +604,7 @@ export class Vitrine {
     this.palcos = this.cb.palcos?.() || this.palcos
     this.calcularRolagem()
     this.definirHover(null)
-    for (const s of this.slots) {
-      s.alvoLuz = s.i === indice ? 1 : 0
-      s.alvoElev = 0
-    }
+    for (const s of this.slots) s.alvoLuz = s.i === indice ? 1 : 0
     this.canvas.style.cursor = this.modo === 'produto' ? 'zoom-in' : ''
     // a câmera parte de onde está e vai até o destino, que é recalculado a cada quadro
     this.trans.de = { pos: this.camera.position.clone(), alvo: this.olhar ? this.olhar.clone() : this.destino().alvo }
@@ -514,12 +631,16 @@ export class Vitrine {
     this.ativo = indice
     const d = this.destino()
     // começa mais perto e um pouco de lado, com a luz apagada; a câmera recua e a parede acende
-    this.camera.position.copy(d.pos).add(new THREE.Vector3(-0.5 * d.dist * 0.1, 0.3, -d.dist * 0.38))
+    this.camera.position.copy(d.pos).add(new THREE.Vector3(-0.05 * d.dist, 0.3, -d.dist * 0.38))
     this.olhar = d.alvo.clone().add(new THREE.Vector3(0.15, 0.05, 0))
     this.camera.lookAt(this.olhar)
     const forca = this.chave.intensity
+    const forcaFoco = this.uParede.uForcaFoco.value
     this.chave.intensity = 0
+    this.uParede.uForcaFoco.value = 0
     gsap.to(this.chave, { intensity: forca, duration: 1.6, ease: 'power2.out', onUpdate: () => (this.sujo = true) })
+    // os spots do teto acendem logo depois da luz geral
+    gsap.to(this.uParede.uForcaFoco, { value: forcaFoco, duration: 1.4, delay: 0.5, ease: 'power2.out', onUpdate: () => (this.sujo = true) })
     this.irPara(indice, { intro: true })
     if (indice == null) {
       // teste de LEDs: as prateleiras acendem em sequência, como uma loja abrindo
@@ -532,9 +653,8 @@ export class Vitrine {
         })
       })
     }
-    // primeiro quadro (sombras e upload restante) também atrás da tela de carregamento
+    // primeiro quadro (upload restante e shaders) também atrás da tela de carregamento
     this.aplicarCamera()
-    this.renderer.shadowMap.needsUpdate = true
     this.renderer.render(this.cena, this.camera)
     this.raf = requestAnimationFrame(this.quadro)
   }
@@ -543,16 +663,8 @@ export class Vitrine {
     if (i === this.hover) return
     const antes = this.hover
     this.hover = i
-    if (antes != null && this.modo === 'parede') {
-      const s = this.slots[antes]
-      s.alvoLuz = 0
-      s.alvoElev = 0
-    }
-    if (i != null && this.modo === 'parede') {
-      const s = this.slots[i]
-      s.alvoLuz = 0.62
-      s.alvoElev = 0.022
-    }
+    if (antes != null && this.modo === 'parede') this.slots[antes].alvoLuz = 0
+    if (i != null && this.modo === 'parede') this.slots[i].alvoLuz = 0.62
     if (this.modo === 'parede') this.canvas.style.cursor = i != null ? 'pointer' : ''
     this.cb.hover?.(i)
   }
@@ -590,11 +702,31 @@ export class Vitrine {
       }
     }
     if (novo <= 1.001) this.focoAlvo.set(0, 0)
-    const antes = this.zoomAlvo > 1.05
     this.zoomAlvo = novo
-    if (antes !== novo > 1.05) this.cb.zoom?.(novo > 1.05)
-    if (this.modo === 'produto') this.canvas.style.cursor = novo > 1.05 ? 'grab' : 'zoom-in'
+    this.avisarZoom()
     this.sujo = true
+  }
+
+  // leva a câmera até um ponto de detalhe da foto e centraliza nele
+  focarDetalhe(u, v) {
+    if (this.ativo == null) return
+    const p = this.pontoDaFoto(this.ativo, u, v)
+    const base = this.quadroProduto().alvo
+    const f = 1 - 1 / ZOOM_DETALHE
+    this.focoAlvo.set((p.x - base.x) / f, (p.y - base.y) / f)
+    this.limitarFoco()
+    this.zoomAlvo = ZOOM_DETALHE
+    this.avisarZoom()
+    this.sujo = true
+  }
+
+  avisarZoom() {
+    const z = this.zoomAlvo > 1.05
+    if (z !== this.comZoom) {
+      this.comZoom = z
+      this.cb.zoom?.(z)
+    }
+    if (this.modo === 'produto') this.canvas.style.cursor = z ? 'grab' : 'zoom-in'
   }
 
   // --- ponteiro -----------------------------------------------------------------------------------
@@ -640,6 +772,7 @@ export class Vitrine {
           this.focoAlvo.y += (dy * k) / f
           this.limitarFoco()
           c.style.cursor = 'grabbing'
+          this.cb.arrastou?.()
           this.sujo = true
         }
         return
@@ -678,6 +811,7 @@ export class Vitrine {
         const ult = this.ultimoToque
         if (ult && agora - ult.t < 320 && Math.hypot(e.clientX - ult.x, e.clientY - ult.y) < 30) {
           this.definirZoom(this.zoomAlvo > 1.2 ? 1 : 2, e.clientX, e.clientY)
+          this.cb.arrastou?.()
           this.ultimoToque = null
         } else this.ultimoToque = { t: agora, x: e.clientX, y: e.clientY }
         return
@@ -689,6 +823,7 @@ export class Vitrine {
       e.preventDefault()
       const passo = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
       this.definirZoom(this.zoomAlvo * Math.exp(-passo * 0.0016), e.clientX, e.clientY)
+      this.cb.arrastou?.()
     }
     this.aoSair = () => {
       if (this.modo === 'parede') this.definirHover(null)
@@ -714,7 +849,6 @@ export class Vitrine {
     this.ultimo = agora
     let mexeu = this.sujo
     this.sujo = false
-    let sombra = false
 
     const k = 1 - Math.exp(-dt * 3)
     if (this.mouseSuave.distanceToSquared(this.mouse) > 1e-7) {
@@ -723,34 +857,27 @@ export class Vitrine {
     }
     if (this.trans.de) mexeu = true
 
-    const kz = 1 - Math.exp(-dt * 7)
+    const kz = 1 - Math.exp(-dt * 6)
     if (Math.abs(this.zoomAlvo - this.zoom) > 1e-4 || this.foco.distanceToSquared(this.focoAlvo) > 1e-8) {
       this.zoom += (this.zoomAlvo - this.zoom) * kz
       this.foco.lerp(this.focoAlvo, kz)
       mexeu = true
     }
 
-    const ks = 1 - Math.exp(-dt * 7)
     const kl = 1 - Math.exp(-dt * 5)
-    let maisLuz = null
     for (const s of this.slots) {
-      if (Math.abs(s.alvoElev - s.elev) > 1e-5) {
-        s.elev += (s.alvoElev - s.elev) * ks
-        sombra = mexeu = true
-      }
       if (Math.abs(s.alvoLuz - s.luz) > 1e-4) {
         s.luz += (s.alvoLuz - s.luz) * kl
         mexeu = true
       }
-      // no produto, os vizinhos ficam na penumbra para o escolhido se destacar
+      // no produto, os vizinhos ficam na penumbra e fora de foco para o escolhido se destacar
       const apaga = this.modo === 'produto' && s.i !== this.ativo ? 1 : 0
       if (Math.abs(apaga - s.apaga) > 1e-4) {
         s.apaga += (apaga - s.apaga) * kl
         s.uniformes.uApaga.value = s.apaga
+        s.uniformes.uVies.value = -0.45 + s.apaga * 2.6
         mexeu = true
       }
-      s.pivo.position.y = 0.002 + s.elev
-      s.pivo.scale.setScalar(1 + s.elev * 0.7)
       const l = s.luz
       s.uniformes.uLuz.value = l
       s.matFrente.emissiveIntensity = l * 2.4
@@ -759,15 +886,13 @@ export class Vitrine {
       halo.material.opacity = l * 0.85
       nucleo.material.opacity = l
       espalha.material.opacity = l * 0.26
-      topo.material.opacity = l * 0.32
+      topo.material.opacity = l * 0.12
       halo.visible = nucleo.visible = espalha.visible = topo.visible = l > 0.002
-      if (!maisLuz || l > maisLuz.luz) maisLuz = s
     }
 
     if (!mexeu || !this.slots.length) return
     this.aplicarCamera()
     this.posicionarRotulos()
-    if (sombra) this.renderer.shadowMap.needsUpdate = true
     this.renderer.render(this.cena, this.camera)
   }
 
@@ -792,19 +917,32 @@ export class Vitrine {
     this.camera.lookAt(alvo)
   }
 
+  naTela(p) {
+    this.v.copy(p).project(this.camera)
+    return { x: ((this.v.x + 1) / 2) * this.w, y: ((1 - this.v.y) / 2) * this.h }
+  }
+
   posicionarRotulos() {
     const els = this.cb.rotulos?.()
-    if (!els) return
-    for (const s of this.slots) {
-      const el = els[s.i]
-      if (!el) continue
-      this.v.set(s.x - PRAT.w / 2, s.y - PRAT.h, PRAT.d).project(this.camera)
-      const x1 = ((this.v.x + 1) / 2) * this.w
-      const y = ((1 - this.v.y) / 2) * this.h
-      this.v.set(s.x + PRAT.w / 2, s.y - PRAT.h, PRAT.d).project(this.camera)
-      const x2 = ((this.v.x + 1) / 2) * this.w
-      el.style.transform = `translate3d(${x1.toFixed(1)}px, ${y.toFixed(1)}px, 0)`
-      el.style.width = `${(x2 - x1).toFixed(1)}px`
+    if (els) {
+      for (const s of this.slots) {
+        const el = els[s.i]
+        if (!el) continue
+        const a = this.naTela(this.v.set(s.x - PRAT.w / 2, s.y - PRAT.h, PRAT.d))
+        const b = this.naTela(this.v.set(s.x + PRAT.w / 2, s.y - PRAT.h, PRAT.d))
+        el.style.transform = `translate3d(${a.x.toFixed(1)}px, ${a.y.toFixed(1)}px, 0)`
+        el.style.width = `${(b.x - a.x).toFixed(1)}px`
+      }
+    }
+    // pontos de detalhe do tênis em foco
+    const pontos = this.cb.pontos?.()
+    if (pontos && this.ativo != null) {
+      const det = this.produtos[this.ativo]?.detalhes || []
+      pontos.forEach((el, j) => {
+        if (!el || !det[j]) return
+        const p = this.naTela(this.pontoDaFoto(this.ativo, det[j].x, det[j].y))
+        el.style.transform = `translate3d(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px, 0)`
+      })
     }
   }
 
